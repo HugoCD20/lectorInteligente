@@ -1,5 +1,3 @@
-# Requisitos funcionales
-
 ## Usuarios
 
 - Crear usuario
@@ -11,5 +9,4 @@
 - Registrar archivo
 	- Guardar traducciones
 - Eliminar archivos
-
-# Requisitos nofuncionales
+- Lectura

@@ -1,0 +1,10 @@
+- Rendimento
+- Escalabilidad
+- Disponibilidad
+- Seguridad
+	- Las contraseñas estarán cifradas.
+	- El sistema implementará autenticación y autorización por roles.
+	- Se validarán todas las entradas del usuario para prevenir inyecciones SQL y XSS.
+- Usabilidad
+- Compatibilidad
+- Mantenibilidad

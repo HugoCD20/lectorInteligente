@@ -19,7 +19,7 @@ Este proyecto está dirigido para lectores que necesiten  traducir textos de man
 
 ## Tecnologías
 
-- Laravel
+- Django
 - flutter
 - PostgreSQL
 - Libretranslate
