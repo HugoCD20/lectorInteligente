@@ -42,3 +42,13 @@ Motivo
 
 - Alto rendimiento.
 - Soporte para JSONB.
+## Servicios de infraestructura
+
+- PostgreSQL
+- LibreTranslate (Docker)
+
+LibreTranslate se ejecutará como un contenedor independiente dentro de la infraestructura del proyecto.
+
+Toda comunicación con LibreTranslate deberá realizarse a través de la red interna de Docker.
+
+El frontend nunca deberá comunicarse directamente con LibreTranslate.
