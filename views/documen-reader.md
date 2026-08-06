@@ -16,3 +16,8 @@ Mostrar el documento en pantalla disponible para su lectura
 ## Requisitos de diseño
 
 > Esta aplicación está diseñada para el entorno web, pero en el futuro puede escalar a ser multiplataforma, así que cuida y manten un diseño responsivo
+
+---
+### Mejoras futuras
+
+- Implementación de un RAG o IA para resolución de preguntas o dudas.
