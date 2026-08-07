@@ -3,6 +3,8 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
+from apps.users.repositories import UserRepository
+
 User = get_user_model()
 
 
@@ -129,3 +131,61 @@ class ChangePasswordTests(APITestCase):
             format="json",
         )
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class UserRepositoryTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="Test@Example.com",
+            password="StrongPass123!",
+        )
+
+    def test_get_by_email_is_case_insensitive(self):
+        self.assertEqual(UserRepository().get_by_email("test@example.com"), self.user)
+
+    def test_str_returns_email(self):
+        self.assertEqual(str(self.user), "Test@example.com")
+
+    def test_get_by_email_missing_returns_none(self):
+        self.assertIsNone(UserRepository().get_by_email("missing@example.com"))
+
+    def test_get_active_by_email_excludes_inactive(self):
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        self.assertIsNone(UserRepository().get_active_by_email("test@example.com"))
+
+
+class UserManagerTests(APITestCase):
+    def test_create_user_requires_email(self):
+        with self.assertRaises(ValueError):
+            User.objects.create_user(email="", password="StrongPass123!")
+
+    def test_create_user_defaults_not_staff_or_superuser(self):
+        user = User.objects.create_user(email="normal@example.com", password="StrongPass123!")
+        self.assertFalse(user.is_staff)
+        self.assertFalse(user.is_superuser)
+        self.assertTrue(user.is_active)
+
+    def test_create_superuser_requires_staff(self):
+        with self.assertRaises(ValueError):
+            User.objects.create_superuser(
+                email="root@example.com",
+                password="StrongPass123!",
+                is_staff=False,
+            )
+
+    def test_create_superuser_requires_superuser_flag(self):
+        with self.assertRaises(ValueError):
+            User.objects.create_superuser(
+                email="root@example.com",
+                password="StrongPass123!",
+                is_superuser=False,
+            )
+
+    def test_create_superuser_succeeds_with_flags(self):
+        user = User.objects.create_superuser(
+            email="root@example.com",
+            password="StrongPass123!",
+        )
+        self.assertTrue(user.is_staff)
+        self.assertTrue(user.is_superuser)

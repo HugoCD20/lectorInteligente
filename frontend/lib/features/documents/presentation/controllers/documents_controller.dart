@@ -98,7 +98,7 @@ class DocumentsController extends StateNotifier<DocumentsState> {
       state = state.copyWith(
         loadingGallery: false,
         documents: documents,
-        page: result.page,
+        page: result.hasMore ? result.page + 1 : result.page,
         hasMore: result.hasMore,
       );
     } catch (error) {

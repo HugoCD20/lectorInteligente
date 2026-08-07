@@ -1,14 +1,23 @@
 import tempfile
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import override_settings
+from django.test import SimpleTestCase, override_settings
 from django.urls import reverse
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.test import APITestCase
 
 from apps.documents.models import Document
+from apps.documents.reading import ReadingService
+from apps.documents.repositories import DocumentRepository
 from apps.documents.services import DocumentService
+from apps.documents.validators import (
+    normalize_original_name,
+    validate_document_content,
+    validate_document_extension,
+    validate_document_size,
+)
 
 User = get_user_model()
 
@@ -171,6 +180,53 @@ class GalleryTests(APITestCase):
         self.client.force_authenticate(user=None)
         response = self.client.get(reverse("documents-gallery"))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_gallery_returns_flat_results_without_pagination(self):
+        with patch("apps.documents.views.GalleryView.paginate_queryset", return_value=None):
+            response = self.client.get(reverse("documents-gallery"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()["data"]
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(len(body["results"]), 2)
+
+
+class GalleryQueryCountTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+        self.client.force_authenticate(self.user)
+
+    def _create_with_translations(self, name, n_translations):
+        from apps.translations.models import Translation
+
+        document = create_document(self.user, name)
+        Translation.objects.bulk_create(
+            [
+                Translation(
+                    document=document,
+                    target_language=f"xx{i}",
+                    status="completed",
+                    total_pages=1,
+                    processed_pages=1,
+                )
+                for i in range(n_translations)
+            ]
+        )
+        return document
+
+    def test_gallery_query_count_does_not_grow_with_translations(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        for i in range(5):
+            self._create_with_translations(f"doc{i}.pdf", 3)
+        with CaptureQueriesContext(connection) as context:
+            response = self.client.get(reverse("documents-gallery"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["data"]["count"], 5)
+        self.assertLessEqual(len(context), 4)
 
 
 class RecentDocumentsTests(APITestCase):
@@ -404,6 +460,22 @@ class DocumentReadingTests(APITestCase):
         response = self.client.get(reverse("document-read", args=[self.document.pk]))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+    def test_read_query_count_is_bounded_with_cache_and_translation(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        self._translate(self.document)
+        with CaptureQueriesContext(connection) as context:
+            response = self.client.get(
+                reverse("document-read", args=[self.document.pk]),
+                {"page": 1, "target_language": "es"},
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["data"]["total_pages"], 3)
+        # Límite fijo: documento + traducciones prefetched + traducción +
+        # páginas traducidas. No crece con el número de páginas ni idiomas.
+        self.assertLessEqual(len(context), 6)
+
     def test_recent_orders_by_last_opened(self):
         first = DocumentService().upload(
             self.user, make_readable_pdf("Primero", name="Primero.pdf")
@@ -473,3 +545,116 @@ class DocumentFileTests(APITestCase):
     def test_media_directory_not_publicly_served(self):
         response = self.client.get(f"/media/{self.document.file.name}")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_serializer_returns_relative_file_url_without_request(self):
+        from apps.documents.serializers import DocumentSerializer
+
+        data = DocumentSerializer(self.document).data
+        self.assertEqual(data["file"], f"/api/documents/{self.document.pk}/file/")
+
+
+class DocumentManagerAndRepositoryTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+        self.document = create_document(self.user, "algoritmos.pdf")
+
+    def test_all_objects_includes_soft_deleted_documents(self):
+        Document.objects.filter(pk=self.document.pk).update(
+            deleted_at="2026-01-01T00:00:00Z"
+        )
+        self.assertFalse(Document.objects.filter(pk=self.document.pk).exists())
+        self.assertTrue(Document.all_objects.filter(pk=self.document.pk).exists())
+
+    def test_str_returns_original_name(self):
+        self.assertEqual(str(self.document), "algoritmos.pdf")
+
+    def test_repository_list_applies_valid_ordering(self):
+        create_document(self.user, "beta.pdf")
+        queryset = DocumentRepository().list_for_user(
+            self.user, ordering="original_name"
+        )
+        names = list(queryset.values_list("original_name", flat=True))
+        self.assertEqual(names, ["algoritmos.pdf", "beta.pdf"])
+
+    def test_repository_list_ignores_invalid_ordering(self):
+        queryset = DocumentRepository().list_for_user(
+            self.user, ordering="deleted_at DESC"
+        )
+        self.assertEqual(queryset.count(), 1)
+
+
+class ReadingServiceTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+
+    def test_read_returns_empty_window_when_document_has_no_pages(self):
+        document = create_document(self.user, "vacío.pdf")
+        with patch(
+            "apps.documents.reading.extract_pages",
+            return_value=[],
+        ):
+            result = ReadingService().read(document)
+
+        self.assertEqual(result["total_pages"], 0)
+        self.assertEqual(result["page"], 1)
+        self.assertEqual(result["pages"], [])
+
+    def test_read_caches_extracted_pages(self):
+        document = create_document(self.user, "cacheable.pdf")
+        with patch(
+            "apps.documents.reading.extract_pages",
+            return_value=["Uno", "Dos"],
+        ) as extract:
+            service = ReadingService()
+            service.read(document)
+            service.read(document, page=2)
+
+        extract.assert_called_once()
+
+
+class DocumentValidatorTests(SimpleTestCase):
+    def test_validate_document_extension_rejects_invalid_format(self):
+        with self.assertRaises(serializers.ValidationError):
+            validate_document_extension(SimpleUploadedFile("malware.exe", b"x"))
+
+    def test_validate_document_size_rejects_oversized_file(self):
+        with patch(
+            "apps.documents.validators.settings.MAX_DOCUMENT_SIZE",
+            100,
+        ):
+            with self.assertRaises(serializers.ValidationError):
+                validate_document_size(
+                    SimpleUploadedFile("grande.pdf", b"x" * 200)
+                )
+
+    def test_validate_document_content_rejects_mismatched_bytes(self):
+        with self.assertRaises(serializers.ValidationError):
+            validate_document_content(
+                SimpleUploadedFile("falso.pdf", b"PK\x03\x04 not a pdf")
+            )
+
+    def test_validate_document_content_rejects_unreadable_file(self):
+        class UnreadableFile:
+            name = "corrupto.pdf"
+
+            def seek(self, *args, **kwargs):
+                raise OSError("boom")
+
+            def read(self, *args, **kwargs):
+                raise OSError("boom")
+
+        with self.assertRaises(serializers.ValidationError):
+            validate_document_content(UnreadableFile())
+
+    def test_normalize_original_name_removes_path(self):
+        self.assertEqual(
+            normalize_original_name("/tmp/carpeta/documento.pdf"),
+            "documento.pdf",
+        )
+        self.assertEqual(normalize_original_name(""), "documento")

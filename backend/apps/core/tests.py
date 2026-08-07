@@ -32,6 +32,12 @@ class HealthCheckTests(APITestCase):
         response = self.client.get(reverse("health-check"))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_health_check_reports_database_error(self):
+        with patch("apps.core.views.connection.ensure_connection", side_effect=OSError("down")):
+            response = self.client.get(reverse("health-check"))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["data"]["status"], "error")
+
 
 class ErrorHandlingTests(APITestCase):
     def test_unhandled_drf_error_returns_consistent_format(self):

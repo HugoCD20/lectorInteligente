@@ -30,8 +30,11 @@ class _GalleryPageState extends ConsumerState<GalleryPage> {
   @override
   void initState() {
     super.initState();
-    ref.read(documentsControllerProvider.notifier).loadRecent();
-    ref.read(documentsControllerProvider.notifier).loadGallery(refresh: true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(documentsControllerProvider.notifier).loadRecent();
+      ref.read(documentsControllerProvider.notifier).loadGallery(refresh: true);
+    });
   }
 
   @override

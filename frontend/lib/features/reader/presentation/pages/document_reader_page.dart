@@ -24,11 +24,14 @@ class _DocumentReaderPageState extends ConsumerState<DocumentReaderPage> {
   @override
   void initState() {
     super.initState();
-    ref.read(readerControllerProvider.notifier).open(
-          documentId: widget.document.id,
-          documentName: widget.document.originalName,
-          translations: widget.document.translations,
-        );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      ref.read(readerControllerProvider.notifier).open(
+            documentId: widget.document.id,
+            documentName: widget.document.originalName,
+            translations: widget.document.translations,
+          );
+    });
   }
 
   @override

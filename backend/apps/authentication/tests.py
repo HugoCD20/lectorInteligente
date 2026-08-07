@@ -302,3 +302,47 @@ class ProtectedEndpointTests(APITestCase):
         self.assertTrue(body["success"])
         self.assertEqual(body["data"]["id"], self.user.id)
         self.assertEqual(body["data"]["email"], "test@example.com")
+
+
+class LogoutErrorPathTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+        tokens = get_tokens(self.client)
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+
+    def test_logout_with_invalid_refresh_token(self):
+        response = self.client.post(
+            reverse("logout"),
+            {"refresh": "token-invalido"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        body = response.json()
+        self.assertFalse(body["success"])
+        self.assertEqual(body["message"], "Token de refresco inválido o ya utilizado.")
+
+
+class PasswordResetErrorPathTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+
+    def test_password_reset_confirm_invalid_uid(self):
+        response = self.client.post(
+            reverse("password-reset-confirm"),
+            {
+                "uid": "uid-no-valido",
+                "token": "token",
+                "new_password": "NewStrongPass123!",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        body = response.json()
+        self.assertFalse(body["success"])
+        self.assertEqual(body["message"], "El enlace de restablecimiento es inválido.")

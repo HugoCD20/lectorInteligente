@@ -61,6 +61,7 @@ class _RegisterPageState extends ConsumerState<RegisterPage> {
   Widget build(BuildContext context) {
     return AuthScaffold(
       title: AppStrings.createAccount,
+      formKey: _formKey,
       children: [
         AppTextField(
           controller: _emailController,
@@ -116,8 +117,9 @@ class _RegisterPageState extends ConsumerState<RegisterPage> {
           onPressed: _submit,
         ),
         const SizedBox(height: AppSpacing.md),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        Wrap(
+          alignment: WrapAlignment.center,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             Text(
               AppStrings.alreadyHaveAccount,

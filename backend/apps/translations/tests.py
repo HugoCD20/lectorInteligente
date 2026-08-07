@@ -1,10 +1,11 @@
 import io
 import zipfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import SimpleTestCase
 from django.urls import reverse
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
@@ -19,7 +20,6 @@ from apps.translations.client import LibreTranslateClient
 from apps.translations.extractors import extract_epub_pages, extract_pdf_pages
 from apps.translations.models import Translation, TranslationPage
 from apps.translations.services import TranslationService, document_version, split_into_chunks
-
 User = get_user_model()
 
 
@@ -140,6 +140,88 @@ class ExtractorTests(APITestCase):
             from apps.translations.extractors import extract_pages
 
             extract_pages(document)
+
+    def test_extract_pages_propagates_api_error(self):
+        document = create_document(
+            self._user(),
+            make_epub("a"),
+            file_name="libro.epub",
+        )
+        from apps.translations.extractors import extract_pages
+
+        with patch(
+            "apps.translations.extractors.extract_epub_pages",
+            side_effect=APIError("estructura inválida"),
+        ):
+            with self.assertRaises(APIError):
+                extract_pages(document)
+
+    def test_extract_pages_wraps_unexpected_errors(self):
+        document = create_document(
+            self._user(),
+            make_epub("a"),
+            file_name="libro.epub",
+        )
+        from apps.translations.extractors import extract_pages
+
+        with patch(
+            "apps.translations.extractors.extract_epub_pages",
+            side_effect=ValueError("inesperado"),
+        ):
+            with self.assertRaises(APIError):
+                extract_pages(document)
+
+    @patch("apps.translations.extractors.MAX_EXTRACTED_PAGES", 1)
+    def test_extract_epub_page_limit_rejected(self, *_):
+        with self.assertRaises(APIError):
+            extract_epub_pages(io.BytesIO(make_epub("Cap uno", "Cap dos")))
+
+    def test_epub_without_valid_structure_rejected(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "META-INF/container.xml",
+                '<?xml version="1.0"?>'
+                '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"/>',
+            )
+        buffer.seek(0)
+        with self.assertRaises(APIError):
+            extract_epub_pages(buffer)
+
+    def _make_epub_with(self, manifest, spine, files=None):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "META-INF/container.xml",
+                '<?xml version="1.0"?>'
+                '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                'media-type="application/oebps-package+xml"/></rootfiles></container>',
+            )
+            archive.writestr(
+                "OEBPS/content.opf",
+                '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0">'
+                f"<manifest>{manifest}</manifest><spine>{spine}</spine></package>",
+            )
+            for name, content in (files or {}).items():
+                archive.writestr(name, content)
+        buffer.seek(0)
+        return buffer
+
+    def test_epub_skips_missing_content_file(self):
+        epub = self._make_epub_with(
+            manifest='<item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>',
+            spine='<itemref idref="c1"/>',
+        )
+        self.assertEqual(extract_epub_pages(epub), [])
+
+    def test_epub_skips_spine_item_not_in_manifest(self):
+        epub = self._make_epub_with(
+            manifest='<item id="c1" href="chap1.xhtml" media-type="application/xhtml+xml"/>',
+            spine='<itemref idref="fantasma"/>',
+            files={"OEBPS/chap1.xhtml": "<html><body><p>Contenido</p></body></html>"},
+        )
+        self.assertEqual(extract_epub_pages(epub), [])
 
     def _user(self):
         return User.objects.create_user(
@@ -402,6 +484,27 @@ class TranslationApiTests(APITestCase):
         self.assertEqual(len(data), 3)
         self.assertIn("es", {item["code"] for item in data})
 
+    @patch.object(LibreTranslateClient, "languages", return_value=SUPPORTED_LANGUAGES)
+    @patch.object(TranslationService, "start_async")
+    def test_translate_reuses_active_translation(self, *mocks):
+        url = reverse("document-translate", args=[self.document.pk])
+        first = self.client.post(url, {"target_language": "en"}, format="json")
+        self.assertEqual(first.status_code, status.HTTP_202_ACCEPTED)
+
+        second = self.client.post(url, {"target_language": "en"}, format="json")
+        self.assertEqual(second.status_code, status.HTTP_200_OK)
+        self.assertEqual(second.json()["message"], "Traducción disponible.")
+
+    def test_translation_str_representations(self):
+        service = TranslationService(client=FakeClient())
+        translation, _ = service.start(self.document, "en")
+        self.assertIn(str(self.document.pk), str(translation))
+        self.assertIn("en", str(translation))
+
+        page = translation.pages.first()
+        self.assertIn(f"página {page.page_number}", str(page))
+        self.assertIn(str(translation.pk), str(page))
+
 
 class TranslationCascadeTests(APITestCase):
     def test_document_delete_soft_deletes_translations(self):
@@ -481,3 +584,120 @@ class TranslationThrottleTests(APITestCase):
         second = self.client.post(url, {"target_language": "es"}, format="json")
         self.assertEqual(second.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
         self.assertFalse(second.json()["success"])
+
+
+class _FakeResponse:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class LibreTranslateClientTests(SimpleTestCase):
+    def test_default_base_url_uses_settings(self):
+        with patch(
+            "apps.translations.client.settings.LIBRETRANSLATE_URL",
+            "http://lt:5000/",
+        ):
+            client = LibreTranslateClient()
+        self.assertEqual(client.base_url, "http://lt:5000")
+
+    def test_custom_base_url_strips_trailing_slash(self):
+        client = LibreTranslateClient(base_url="http://lt:5000/")
+        self.assertEqual(client.base_url, "http://lt:5000")
+
+    def test_translate_returns_translated_text(self):
+        response = _FakeResponse(b'{"translatedText":"Hola"}')
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            result = LibreTranslateClient(base_url="http://lt").translate("Hello", "es")
+
+        self.assertEqual(result, "Hola")
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, "http://lt/translate")
+        self.assertEqual(request.method, "POST")
+        self.assertIn(b'"target": "es"', request.data)
+
+    def test_translate_missing_key_returns_empty(self):
+        with patch("urllib.request.urlopen", return_value=_FakeResponse(b"{}")):
+            result = LibreTranslateClient(base_url="http://lt").translate("Hello", "es")
+        self.assertEqual(result, "")
+
+    def test_languages_uses_get(self):
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_FakeResponse(b"[]"),
+        ) as urlopen:
+            result = LibreTranslateClient(base_url="http://lt").languages()
+
+        self.assertEqual(result, [])
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, "http://lt/languages")
+        self.assertEqual(request.method, "GET")
+
+    def test_connection_error_raises_api_error(self):
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timeout")):
+            with self.assertRaises(APIError):
+                LibreTranslateClient(base_url="http://lt").translate("Hello", "es")
+
+
+class ChunkingTests(SimpleTestCase):
+    def test_split_handles_word_longer_than_limit(self):
+        chunks = split_into_chunks("x" * 1000, max_chars=100)
+        self.assertEqual(len(chunks), 10)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 100)
+
+    def test_split_keeps_short_paragraph_whole(self):
+        self.assertEqual(split_into_chunks("Hola mundo.", max_chars=100), ["Hola mundo."])
+
+    def test_split_breaks_long_paragraph_by_words(self):
+        chunks = split_into_chunks(" ".join(["palabra"] * 100), max_chars=100)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 100)
+
+    def test_split_handles_oversized_word_after_short_words(self):
+        chunks = split_into_chunks("hola " + "x" * 300, max_chars=100)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 100)
+
+
+class TranslationServiceEdgeCaseTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="test@example.com",
+            password="StrongPass123!",
+        )
+        self.service = TranslationService(client=FakeClient())
+
+    def test_translate_content_blank_returns_empty(self):
+        self.assertEqual(self.service._translate_content("   \n ", "auto", "es"), "")
+
+    def test_start_async_spawns_background_thread(self):
+        fake_thread = Mock()
+        with patch(
+            "apps.translations.services.threading.Thread",
+            return_value=fake_thread,
+        ) as thread_cls:
+            self.service.start_async(999)
+
+        thread_cls.assert_called_once_with(
+            target=self.service._run_background,
+            args=(999,),
+            daemon=True,
+        )
+        fake_thread.start.assert_called_once()
+
+    def test_run_background_processes_translation(self):
+        self.service.process = Mock()
+        with patch("apps.translations.services.close_old_connections"):
+            self.service._run_background(123)
+        self.service.process.assert_called_once_with(123)
