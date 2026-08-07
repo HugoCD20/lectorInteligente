@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Django
+backend/.env
+backend/logs/*
+!backend/logs/.gitkeep
+backend/static/*
+!backend/static/.gitkeep
+backend/media/*
+!backend/media/.gitkeep
+
+# Flutter
+frontend/build/
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/.pub/
+frontend/.pub-cache/
+frontend/android/local.properties
+frontend/ios/Flutter/.last_build_id
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
